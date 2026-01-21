@@ -1,0 +1,403 @@
+import { initializeApp } from "firebase/app";
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithCredential,
+} from "firebase/auth/web-extension";
+import {
+  getFirestore,
+  collection,
+  getDocs,
+  increment,
+  doc,
+  setDoc,
+  getDoc,
+  deleteDoc,
+  serverTimestamp,
+} from "firebase/firestore";
+
+const firebaseConfig = {
+  apiKey: process.env.VITE_apiKey,
+  authDomain: process.env.VITE_authDomain,
+  projectId: process.env.VITE_projectId,
+  storageBucket: process.env.VITE_storageBucket,
+  messagingSenderId: process.env.VITE_messagingSenderId,
+  appId: process.env.VITE_appId,
+  measurementId: process.env.VITE_measurementId
+};
+
+const DEFAULT_MAPPINGS = {
+  "github.com": "Productive",
+  "stackoverflow.com": "Productive",
+  "docs.google.com": "Productive",
+  "notion.so": "Productive",
+  "vercel.com": "Productive",
+  "linkedin.com": "Productive",
+  "chatgpt.com": "Productive",
+  "gemini.google.com": "Productive",
+  "claude.ai": "Productive",
+  "figma.com": "Productive",
+  "slack.com": "Productive",
+  "linear.app": "Productive",
+  "medium.com": "Productive",
+  "coursera.org": "Productive",
+  "udemy.com": "Productive",
+  "trello.com": "Productive",
+  "asana.com": "Productive",
+  "jira.atlassian.com": "Productive",
+  "bitbucket.org": "Productive",
+  "gitlab.com": "Productive",
+  "replit.com": "Productive",
+  "codepen.io": "Productive",
+  "leetcode.com": "Productive",
+  "codechef.com": "Productive",
+  "hackerrank.com": "Productive",
+  "overleaf.com": "Productive",
+  "canva.com": "Productive",
+  "lucidchart.com": "Productive",
+  "notion.site": "Productive",
+  "twitter.com": "Social Media",
+  "x.com": "Social Media",
+  "reddit.com": "Social Media",
+  "instagram.com": "Social Media",
+  "facebook.com": "Social Media",
+  "tiktok.com": "Social Media",
+  "threads.net": "Social Media",
+  "pinterest.com": "Social Media",
+  "discord.com": "Social Media",
+  "web.whatsapp.com": "Social Media",
+  "telegram.org": "Social Media",
+  "tumblr.com": "Social Media",
+  "snapchat.com": "Social Media",
+  "quora.com": "Social Media",
+  "youtube.com": "Streaming",
+  "netflix.com": "Streaming",
+  "twitch.tv": "Streaming",
+  "primevideo.com": "Streaming",
+  "disneyplus.com": "Streaming",
+  "hulu.com": "Streaming",
+  "soundcloud.com": "Streaming",
+  "hotstar.com": "Streaming",
+  "vimeo.com": "Streaming",
+  "dailymotion.com": "Streaming",
+  "chess.com": "Streaming",
+  "google.com": "Utilities",
+  "bing.com": "Utilities",
+  "duckduckgo.com": "Utilities",
+  "yahoo.com": "Utilities",
+  "wikipedia.org": "Utilities",
+  "amazon.com": "Utilities",
+  "flipkart.com": "Utilities",
+  "ebay.com": "Utilities",
+  "mail.google.com": "Utilities",
+  "outlook.live.com": "Utilities",
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+let startTime = Date.now();
+let lastTabTitle = "";
+let lastTabUrl = "";
+let userPreferences = {};
+
+async function signInWithGoogle() {
+  const manifest = chrome.runtime.getManifest();
+  const clientId = manifest.oauth2.client_id;
+  const scopes = ["openid", "email", "profile"];
+  const scopesString = encodeURIComponent(scopes.join(" "));
+  const redirectUri = encodeURIComponent(chrome.identity.getRedirectURL());
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&base_uri=https://accounts.google.com/o/oauth2/v2/auth&response_type=id_token&access_type=offline&redirect_uri=${redirectUri}&scope=${scopesString}&nonce=${Math.random().toString(36)}`;
+
+  chrome.identity.launchWebAuthFlow(
+    { url: authUrl, interactive: true },
+    (redirectUrl) => {
+      if (chrome.runtime.lastError || !redirectUrl) return;
+      const params = new URLSearchParams(
+        new URL(redirectUrl).hash.substring(1),
+      );
+      const idToken = params.get("id_token");
+      if (idToken) {
+        const credential = GoogleAuthProvider.credential(idToken);
+        signInWithCredential(auth, credential).then(async (res) => {
+          const cleanUser = {
+            uid: res.user.uid,
+            email: res.user.email,
+            name: res.user.displayName,
+            photo: res.user.photoURL,
+          };
+          await chrome.storage.local.set({ user: cleanUser });
+          await setDoc(
+            doc(db, "users", cleanUser.uid),
+            { ...cleanUser, lastActive: serverTimestamp() },
+            { merge: true },
+          );
+
+          for (const [domain, category] of Object.entries(DEFAULT_MAPPINGS)) {
+            await setDoc(
+              doc(
+                db,
+                "users",
+                cleanUser.uid,
+                "site_preferences",
+                domain.replace(/\./g, "_"),
+              ),
+              { category, domain, updatedAt: serverTimestamp() },
+              { merge: true },
+            );
+          }
+          await loadUserPreferences();
+        });
+      }
+    },
+  );
+}
+
+async function loadUserPreferences() {
+  const storage = await chrome.storage.local.get("user");
+  if (!storage.user?.uid) return;
+  try {
+    const snap = await getDocs(
+      collection(db, "users", storage.user.uid, "site_preferences"),
+    );
+    const newPrefs = {};
+    snap.forEach((d) => {
+      if (d.data().domain) newPrefs[d.data().domain] = d.data().category;
+    });
+    userPreferences = newPrefs;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function getDynamicBrandName(domain) {
+  if (domain.includes("localhost")) return "Localhost";
+  const parts = domain.split(".");
+  let brand =
+    parts.length >= 3
+      ? ["google", "amazon", "microsoft", "vercel", "github"].includes(
+          parts[parts.length - 2],
+        )
+        ? parts[parts.length - 3]
+        : parts[parts.length - 2]
+      : parts[0];
+  return brand.charAt(0).toUpperCase() + brand.slice(1);
+}
+
+async function updateStats(domain, rawTitle, time, date) {
+  const key = `stats_${date.toISOString().split("T")[0]}_${date.getHours().toString().padStart(2, "0")}`;
+  const data = await chrome.storage.local.get(key);
+  const hourstats = data[key] || {};
+  const category =
+    userPreferences[domain] || DEFAULT_MAPPINGS[domain] || "Utilities";
+
+  if (!hourstats[category])
+    hourstats[category] = { total_category_time: 0, sites: {} };
+  hourstats[category].total_category_time += time;
+
+  const siteKey = domain.replace(/\./g, "_");
+  if (!hourstats[category].sites[siteKey]) {
+    hourstats[category].sites[siteKey] = {
+      seconds: 0,
+      title: getDynamicBrandName(domain),
+      domain: domain,
+    };
+  }
+  hourstats[category].sites[siteKey].seconds += time;
+  await chrome.storage.local.set({ [key]: hourstats });
+}
+
+async function updateTime() {
+  const now = Date.now();
+  const duration = Math.floor((now - startTime) / 1000);
+  startTime = now;
+
+  if (duration < 1) return;
+
+  try {
+    // 1. Record time for the PREVIOUS tab if it existed
+    if (lastTabUrl && lastTabUrl.startsWith("http")) {
+      const lastDomain = new URL(lastTabUrl).hostname.replace("www.", "");
+      await updateStats(lastDomain, lastTabTitle, duration, new Date(now - (duration * 1000)));
+    }
+
+    // 2. Determine what to track for the NEXT interval
+    const windows = await chrome.windows.getAll({ populate: true });
+    
+    // Find the window that was most recently "active" 
+    // This helps keep tracking even if you click onto VS Code (split screen)
+    const activeWin = windows.find(win => win.focused) || 
+                     windows.sort((a, b) => b.id - a.id)[0]; // Fallback to last known
+
+    if (activeWin) {
+      const activeTab = activeWin.tabs.find(t => t.active);
+      if (activeTab && activeTab.url && activeTab.url.startsWith("http")) {
+        lastTabUrl = activeTab.url;
+        lastTabTitle = activeTab.title || "";
+      } else {
+        lastTabUrl = ""; 
+      }
+    }
+  } catch (e) {
+    console.error("Update Error:", e);
+  }
+}
+
+async function syncDataToFirestore() {
+  const allData = await chrome.storage.local.get(null);
+  const storage = await chrome.storage.local.get("user");
+
+  if (!storage.user?.uid) {
+    console.warn("🔄 Sync skipped: No user UID found.");
+    return;
+  }
+
+  const statKeys = Object.keys(allData).filter((k) => k.startsWith("stats_"));
+  const userUid = storage.user.uid;
+
+  console.log(`[Sync] Found ${statKeys.length} hourly buckets to sync.`);
+
+  for (const key of statKeys) {
+    const [, dateStr, hour] = key.split("_");
+    const hourData = allData[key];
+
+    console.log(`[Sync] Processing Hour: ${hour} | Date: ${dateStr}`);
+
+    const firestoreUpdate = {
+      lastSynced: serverTimestamp(),
+    };
+
+    for (const cat in hourData) {
+      const categoryTotal = hourData[cat].total_category_time || 0;
+      // console.log(`   📂 Category: ${cat} | Total Time: ${categoryTotal}s`);
+
+      // ... existing dailyField logic ...
+
+      for (const sKey in hourData[cat].sites) {
+        const s = hourData[cat].sites[sKey];
+        // console.log(`      🔗 Site: ${s.domain} | Time: ${s.seconds}s`);
+        
+        const sitePath = `sites_map.${sKey}`;
+        firestoreUpdate[`${sitePath}.seconds`] = increment(s.seconds);
+        firestoreUpdate[`${sitePath}.domain`] = s.domain;
+        firestoreUpdate[`${sitePath}.title`] = s.title;
+        firestoreUpdate[`${sitePath}.category`] = cat;
+      }
+      
+      // Add the increment logic for the category totals here as per your current code
+    }
+
+    if (Object.keys(firestoreUpdate).length > 1) {
+      try {
+        const dayRef = doc(db, "users", userUid, "daily", dateStr);
+        await setDoc(dayRef, firestoreUpdate, { merge: true });
+        // console.log(`✅ [Sync] Successfully pushed data for hour ${hour} to Firestore.`);
+        await chrome.storage.local.remove(key);
+      } catch (e) {
+        console.error(`❌ [Sync] Error for ${key}:`, e);
+      }
+    }
+  }
+}
+
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  if (req.action === "UPDATE_SINGLE_MAPPING") {
+    if (req.category === null) delete userPreferences[req.domain];
+    else userPreferences[req.domain] = req.category;
+    sendResponse({ success: true });
+    (async () => {
+      const storage = await chrome.storage.local.get("user");
+      if (!storage.user?.uid) return;
+      const ref = doc(
+        db,
+        "users",
+        storage.user.uid,
+        "site_preferences",
+        req.domain.replace(/\./g, "_"),
+      );
+      if (req.category === null) await deleteDoc(ref);
+      else
+        await setDoc(
+          ref,
+          {
+            domain: req.domain,
+            category: req.category,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true },
+        );
+    })();
+    return false;
+  }
+
+  if (req.action === "SIGN_OUT") {
+    (async () => {
+      try {
+        await updateTime();
+        await syncDataToFirestore();
+        await chrome.storage.local.clear();
+        const tabs = await chrome.tabs.query({
+          url: chrome.runtime.getURL("dashboard/index.html*"),
+        });
+        if (tabs.length > 0) {
+          chrome.tabs.reload(tabs[0].id);
+          tabs.slice(1).forEach((tab) => chrome.tabs.remove(tab.id));
+        } else {
+          chrome.tabs.create({
+            url: chrome.runtime.getURL("dashboard/index.html"),
+          });
+        }
+      } catch (error) {
+        console.error("Error during graceful sign-out:", error);
+        await chrome.storage.local.clear();
+      }
+    })();
+    return false;
+  }
+
+  if (req.action === "LOGIN_REQUEST") {
+    signInWithGoogle();
+    return false;
+  }
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === "syncFirestore") {
+    await updateTime();
+    await syncDataToFirestore();
+  }
+});
+
+chrome.tabs.onActivated.addListener(async () => {
+  await updateTime();
+});
+
+let isBrowserFocused = true;
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    isBrowserFocused = false;
+  } else {
+    isBrowserFocused = true;
+  }
+  // Immediately trigger an update to "close" the previous time slice
+  updateTime();
+});
+
+chrome.action.onClicked.addListener(async () => {
+  const url = chrome.runtime.getURL("dashboard/index.html");
+  const tabs = await chrome.tabs.query({ url: url + "*" });
+
+  if (tabs.length > 0) {
+    chrome.tabs.update(tabs[0].id, { active: true });
+    chrome.windows.update(tabs[0].windowId, { focused: true });
+  } else {
+    chrome.tabs.create({ url: url });
+  }
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.alarms.create("syncFirestore", { periodInMinutes: 2 });
+});
+loadUserPreferences();
