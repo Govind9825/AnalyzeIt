@@ -97,6 +97,7 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+
 let startTime = Date.now();
 let lastTabTitle = "";
 let lastTabUrl = "";
@@ -185,27 +186,60 @@ function getDynamicBrandName(domain) {
   return brand.charAt(0).toUpperCase() + brand.slice(1);
 }
 
+let isUpdating = false;
+const updateQueue = [];
+
 async function updateStats(domain, rawTitle, time, date) {
-  const key = `stats_${date.toISOString().split("T")[0]}_${date.getHours().toString().padStart(2, "0")}`;
-  const data = await chrome.storage.local.get(key);
-  const hourstats = data[key] || {};
-  const category =
-    userPreferences[domain] || DEFAULT_MAPPINGS[domain] || "Utilities";
-
-  if (!hourstats[category])
-    hourstats[category] = { total_category_time: 0, sites: {} };
-  hourstats[category].total_category_time += time;
-
-  const siteKey = domain.replace(/\./g, "_");
-  if (!hourstats[category].sites[siteKey]) {
-    hourstats[category].sites[siteKey] = {
-      seconds: 0,
-      title: getDynamicBrandName(domain),
-      domain: domain,
-    };
+  if (isUpdating) {
+    return new Promise((resolve) => {
+      updateQueue.push(() => updateStats(domain, rawTitle, time, date).then(resolve));
+    });
   }
-  hourstats[category].sites[siteKey].seconds += time;
-  await chrome.storage.local.set({ [key]: hourstats });
+
+  isUpdating = true;
+
+  try {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const localDateStr = `${year}-${month}-${day}`;
+    const hourStr = date.getHours().toString().padStart(2, "0");
+    
+    const key = `stats_${localDateStr}_${hourStr}`;
+    const storage = await chrome.storage.local.get(key);
+    const hourstats = storage[key] || {};
+    
+    const category = userPreferences[domain] || DEFAULT_MAPPINGS[domain] || "Utilities";
+
+    if (!hourstats[category]) {
+      hourstats[category] = { total_category_time: 0, sites: {} };
+    }
+
+    hourstats[category].total_category_time += time;
+
+    const siteKey = domain.replace(/\./g, "_");
+    if (!hourstats[category].sites[siteKey]) {
+      hourstats[category].sites[siteKey] = {
+        seconds: 0,
+        title: getDynamicBrandName(domain),
+        domain: domain,
+      };
+    }
+    hourstats[category].sites[siteKey].seconds += time;
+
+    await chrome.storage.local.set({ [key]: hourstats });
+    
+    console.log(`📊 [Stored] ${domain}: +${time}s | Day: ${localDateStr}`);
+
+  } catch (e) {
+    console.error("Error in updateStats:", e);
+  } finally {
+    isUpdating = false;
+    if (updateQueue.length > 0) {
+      const nextUpdate = updateQueue.shift();
+      nextUpdate();
+    }
+  }
 }
 
 async function updateTime() {
@@ -216,31 +250,29 @@ async function updateTime() {
   if (duration < 1) return;
 
   try {
-    // 1. Record time for the PREVIOUS tab if it existed
     if (lastTabUrl && lastTabUrl.startsWith("http")) {
       const lastDomain = new URL(lastTabUrl).hostname.replace("www.", "");
       await updateStats(lastDomain, lastTabTitle, duration, new Date(now - (duration * 1000)));
     }
 
-    // 2. Determine what to track for the NEXT interval
-    const windows = await chrome.windows.getAll({ populate: true });
-    
-    // Find the window that was most recently "active" 
-    // This helps keep tracking even if you click onto VS Code (split screen)
-    const activeWin = windows.find(win => win.focused) || 
-                     windows.sort((a, b) => b.id - a.id)[0]; // Fallback to last known
+    const focusedWin = await chrome.windows.getLastFocused();
+    const isAudible = focusedWin.tabs.some(t => t.audible);
+    const currentState = await new Promise(resolve => chrome.idle.queryState(300, resolve));
 
-    if (activeWin) {
-      const activeTab = activeWin.tabs.find(t => t.active);
-      if (activeTab && activeTab.url && activeTab.url.startsWith("http")) {
-        lastTabUrl = activeTab.url;
-        lastTabTitle = activeTab.title || "";
+    if (focusedWin && focusedWin.focused && isBrowserFocused && (idleState === "active" || isAudible)) {
+      const [tab] = await chrome.tabs.query({ active: true, windowId: focusedWin.id });
+      if (tab && tab.url && tab.url.startsWith("http")) {
+        lastTabUrl = tab.url;
+        lastTabTitle = tab.title || "";
       } else {
-        lastTabUrl = ""; 
+        lastTabUrl = "";
       }
+    } else {
+      lastTabUrl = "";
+      lastTabTitle = "";
     }
   } catch (e) {
-    console.error("Update Error:", e);
+    console.error(e);
   }
 }
 
@@ -249,53 +281,79 @@ async function syncDataToFirestore() {
   const storage = await chrome.storage.local.get("user");
 
   if (!storage.user?.uid) {
-    console.warn("🔄 Sync skipped: No user UID found.");
+    console.warn("🔄 [Sync] Skipped: No user UID found.");
     return;
   }
 
   const statKeys = Object.keys(allData).filter((k) => k.startsWith("stats_"));
   const userUid = storage.user.uid;
 
-  console.log(`[Sync] Found ${statKeys.length} hourly buckets to sync.`);
+  if (statKeys.length === 0) {
+    // console.log("Empty sync: No local stats found to push.");
+    return;
+  }
+
+  // console.log(`🚀 [Sync] Starting sync for ${statKeys.length} hourly buckets.`);
 
   for (const key of statKeys) {
-    const [, dateStr, hour] = key.split("_");
-    const hourData = allData[key];
+    const keyParts = key.split("_");
+    if (keyParts.length < 3) continue;
 
-    console.log(`[Sync] Processing Hour: ${hour} | Date: ${dateStr}`);
+    const [, dateStr, hour] = keyParts;
+    const hourData = allData[key];
 
     const firestoreUpdate = {
       lastSynced: serverTimestamp(),
     };
 
+    // console.log(`📅 [Sync] Processing ${dateStr} at ${hour}:00...`);
+
     for (const cat in hourData) {
       const categoryTotal = hourData[cat].total_category_time || 0;
-      // console.log(`   📂 Category: ${cat} | Total Time: ${categoryTotal}s`);
+      if (categoryTotal <= 0) continue;
 
-      // ... existing dailyField logic ...
+      let dailyField = "";
+      if (cat === "Social Media") dailyField = "socialSeconds";
+      else if (cat === "Utilities") dailyField = "utilitySeconds";
+      else dailyField = `${cat.toLowerCase()}Seconds`;
 
+      firestoreUpdate[dailyField] = increment(categoryTotal);
+      firestoreUpdate.totalSeconds = increment(categoryTotal);
+
+      
+      const hourlyFieldBase = `hourly_activity.${hour}`;
+      const catKey = cat === "Social Media" ? "socialMedia" : cat.toLowerCase();
+
+      firestoreUpdate[`${hourlyFieldBase}.total`] = increment(categoryTotal);
+      firestoreUpdate[`${hourlyFieldBase}.${catKey}`] = increment(categoryTotal);
+
+     
       for (const sKey in hourData[cat].sites) {
         const s = hourData[cat].sites[sKey];
-        // console.log(`      🔗 Site: ${s.domain} | Time: ${s.seconds}s`);
-        
         const sitePath = `sites_map.${sKey}`;
+        
+        // console.log(`   🔗 [${cat}] ${s.domain}: ${s.seconds}s`);
+
         firestoreUpdate[`${sitePath}.seconds`] = increment(s.seconds);
         firestoreUpdate[`${sitePath}.domain`] = s.domain;
         firestoreUpdate[`${sitePath}.title`] = s.title;
         firestoreUpdate[`${sitePath}.category`] = cat;
       }
-      
-      // Add the increment logic for the category totals here as per your current code
     }
 
+    
     if (Object.keys(firestoreUpdate).length > 1) {
       try {
         const dayRef = doc(db, "users", userUid, "daily", dateStr);
+        
+        
         await setDoc(dayRef, firestoreUpdate, { merge: true });
-        // console.log(`✅ [Sync] Successfully pushed data for hour ${hour} to Firestore.`);
+
+        
         await chrome.storage.local.remove(key);
+        // console.log(`✅ [Sync] Successfully pushed hour ${hour} to Firestore and cleared local cache.`);
       } catch (e) {
-        console.error(`❌ [Sync] Error for ${key}:`, e);
+        console.error(`❌ [Sync] Critical error for ${key}:`, e);
       }
     }
   }
@@ -375,14 +433,14 @@ chrome.tabs.onActivated.addListener(async () => {
 
 let isBrowserFocused = true;
 
-chrome.windows.onFocusChanged.addListener((windowId) => {
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  await updateTime();
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
     isBrowserFocused = false;
+    lastTabUrl = ""; 
   } else {
     isBrowserFocused = true;
   }
-  // Immediately trigger an update to "close" the previous time slice
-  updateTime();
 });
 
 chrome.action.onClicked.addListener(async () => {
@@ -397,7 +455,19 @@ chrome.action.onClicked.addListener(async () => {
   }
 });
 
+chrome.idle.onStateChanged.addListener(async (state) => {
+  await updateTime();
+  if (state === "idle" || state === "locked") {
+    isBrowserFocused = false;
+    lastTabUrl = "";
+  } else {
+    isBrowserFocused = true;
+    startTime = Date.now();
+  }
+});
+
 chrome.runtime.onInstalled.addListener(() => {
+  chrome.idle.setDetectionInterval(300);
   chrome.alarms.create("syncFirestore", { periodInMinutes: 2 });
 });
 loadUserPreferences();
