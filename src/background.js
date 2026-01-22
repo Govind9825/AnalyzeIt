@@ -252,16 +252,21 @@ async function updateTime() {
   try {
     if (lastTabUrl && lastTabUrl.startsWith("http")) {
       const lastDomain = new URL(lastTabUrl).hostname.replace("www.", "");
-      await updateStats(lastDomain, lastTabTitle, duration, new Date(now - (duration * 1000)));
+      await updateStats(lastDomain, lastTabTitle, duration, new Date(now - duration * 1000));
     }
 
-    const focusedWin = await chrome.windows.getLastFocused();
-    const isAudible = focusedWin.tabs.some(t => t.audible);
-    const currentState = await new Promise(resolve => chrome.idle.queryState(300, resolve));
+    const focusedWin = await chrome.windows.getLastFocused({ populate: true });
+    
+    const isAudible = focusedWin?.tabs?.some(t => t.audible) || false;
 
-    if (focusedWin && focusedWin.focused && isBrowserFocused && (idleState === "active" || isAudible)) {
-      const [tab] = await chrome.tabs.query({ active: true, windowId: focusedWin.id });
-      if (tab && tab.url && tab.url.startsWith("http")) {
+    const idleState = await new Promise(resolve => chrome.idle.queryState(300, resolve));
+
+    if (focusedWin?.focused && (idleState === "active" || isAudible)) {
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        windowId: focusedWin.id
+      });
+      if (tab?.url?.startsWith("http")) {
         lastTabUrl = tab.url;
         lastTabTitle = tab.title || "";
       } else {
@@ -272,7 +277,7 @@ async function updateTime() {
       lastTabTitle = "";
     }
   } catch (e) {
-    console.error(e);
+    console.error("Update Error:", e);
   }
 }
 
