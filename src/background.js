@@ -14,6 +14,7 @@ import {
   getDoc,
   deleteDoc,
   serverTimestamp,
+  writeBatch,
 } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -103,56 +104,66 @@ let lastTabTitle = "";
 let lastTabUrl = "";
 let userPreferences = {};
 
+
 async function signInWithGoogle() {
-  const manifest = chrome.runtime.getManifest();
-  const clientId = manifest.oauth2.client_id;
-  const scopes = ["openid", "email", "profile"];
-  const scopesString = encodeURIComponent(scopes.join(" "));
-  const redirectUri = encodeURIComponent(chrome.identity.getRedirectURL());
-  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&base_uri=https://accounts.google.com/o/oauth2/v2/auth&response_type=id_token&access_type=offline&redirect_uri=${redirectUri}&scope=${scopesString}&nonce=${Math.random().toString(36)}`;
+  try {
+    await new Promise((resolve) => {
+      chrome.identity.getAuthToken({ interactive: false }, (token) => {
+        if (token) {
+          chrome.identity.removeCachedAuthToken({ token }, resolve);
+        } else {
+          resolve();
+        }
+      });
+    });
 
-  chrome.identity.launchWebAuthFlow(
-    { url: authUrl, interactive: true },
-    (redirectUrl) => {
-      if (chrome.runtime.lastError || !redirectUrl) return;
-      const params = new URLSearchParams(
-        new URL(redirectUrl).hash.substring(1),
+    const accessToken = await new Promise((resolve, reject) => {
+      chrome.identity.getAuthToken({ interactive: true }, (token) => {
+        if (chrome.runtime.lastError) {
+          reject(chrome.runtime.lastError);
+        } else {
+          resolve(token);
+        }
+      });
+    });
+
+    const credential = GoogleAuthProvider.credential(null, accessToken);
+    const res = await signInWithCredential(auth, credential);
+
+    const cleanUser = {
+      uid: res.user.uid,
+      email: res.user.email,
+      name: res.user.displayName,
+      photo: res.user.photoURL,
+    };
+
+    await chrome.storage.local.set({ user: cleanUser });
+
+    await setDoc(
+      doc(db, "users", cleanUser.uid),
+      { ...cleanUser, lastActive: serverTimestamp() },
+      { merge: true }
+    );
+
+    const batch = writeBatch(db); 
+    for (const [domain, category] of Object.entries(DEFAULT_MAPPINGS)) {
+      const siteRef = doc(
+        db,
+        "users",
+        cleanUser.uid,
+        "site_preferences",
+        domain.replace(/\./g, "_")
       );
-      const idToken = params.get("id_token");
-      if (idToken) {
-        const credential = GoogleAuthProvider.credential(idToken);
-        signInWithCredential(auth, credential).then(async (res) => {
-          const cleanUser = {
-            uid: res.user.uid,
-            email: res.user.email,
-            name: res.user.displayName,
-            photo: res.user.photoURL,
-          };
-          await chrome.storage.local.set({ user: cleanUser });
-          await setDoc(
-            doc(db, "users", cleanUser.uid),
-            { ...cleanUser, lastActive: serverTimestamp() },
-            { merge: true },
-          );
+      batch.set(siteRef, { category, domain, updatedAt: serverTimestamp() }, { merge: true });
+    }
+    await batch.commit();
 
-          for (const [domain, category] of Object.entries(DEFAULT_MAPPINGS)) {
-            await setDoc(
-              doc(
-                db,
-                "users",
-                cleanUser.uid,
-                "site_preferences",
-                domain.replace(/\./g, "_"),
-              ),
-              { category, domain, updatedAt: serverTimestamp() },
-              { merge: true },
-            );
-          }
-          await loadUserPreferences();
-        });
-      }
-    },
-  );
+    await loadUserPreferences();
+    console.log("AnalyzeIt: Successfully signed in.");
+
+  } catch (error) {
+    console.error("AnalyzeIt Auth Error:", error);
+  }
 }
 
 async function loadUserPreferences() {

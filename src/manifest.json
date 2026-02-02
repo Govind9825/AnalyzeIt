@@ -3,14 +3,11 @@
   "name": "AnalyzeIt",
   "version": "1.0",
   "description": "Analyse your browsing and utilize it to be more productive",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq1RzVvbBz3Q+hWopOrx317buIJQeXXdXpf3w4hJO2A4+K8HHXVyGEkqd/r9vwTzCUTWADdipoqGWOG38+mlGtMbe024Qr+EDKqAcPvkGRunXc5Nt8V7PmotObbugvf7LGcRwXhxl4kySPB3RykuJTTOH/8xRRob84mqHMn6cinffcAPnMXCPFDF5VL72H/13MeKTAj5hUB5l3uQd40xFWwu/aGkam432/ChwIypu6d8PtCv9Gs+3eHxRRsDlsJzfo6zmIKDluGDsZvfMl0JH5nAXUiALlnLnHqaeV/sGgVG8UiKi/HVOzRRajofi7zrgbYOEwCrny/ikwHS1Kt1CkQIDAQAB",
 
   "permissions": [
     "tabs",
     "storage",
     "idle",
-    "declarativeNetRequest",
-    "notifications",
     "alarms",
     "identity"
   ],
@@ -18,7 +15,8 @@
   "host_permissions": [
     "https://api.weather.com/*",
     "https://*.firebaseio.com/*",
-    "https://*.googleapis.com/*"
+    "https://*.googleapis.com/*",
+    "<all_urls>"
   ],
 
   "oauth2": {
@@ -28,14 +26,6 @@
       "email",
       "profile"
     ]
-  },
-
-  "declarative_net_request": {
-    "rule_resources": [{
-      "id": "ruleset_1",
-      "enabled": true,
-      "path": "rules.json"
-    }]
   },
 
   "icons": {
